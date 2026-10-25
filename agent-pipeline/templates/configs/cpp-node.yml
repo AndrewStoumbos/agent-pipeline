@@ -1,0 +1,86 @@
+# .agent-pipeline.yml — full-stack repo: C++ backend (CMake) + JavaScript/TypeScript frontend (npm)
+#
+# Assumed layout (change the paths if yours differ):
+#   backend/    CMakeLists.txt, src/, tests/ (CTest, e.g. GoogleTest or Catch2)
+#   frontend/   package.json with "lint" and "test" scripts
+#
+# Make sure .gitignore covers backend/build/ and frontend/node_modules/ — the builder
+# commits everything that isn't ignored.
+
+language: node              # installs Node; the C++ toolchain is added in setup below
+version: "20"
+
+setup: |
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq ninja-build clang-format clang-tidy
+  # C++ dependencies: add your package manager here if you use one, e.g.
+  #   vcpkg install --x-manifest-root=backend   or   conan install backend --build=missing
+  cmake -S backend -B backend/build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+  npm ci --prefix frontend
+
+# Each gate skips itself when the PR didn't touch that half of the repo.
+# $AGENT_BASE_SHA is set by the pipeline to the PR's base commit.
+gates:
+  - name: backend-format
+    run: |
+      if git diff --quiet "$AGENT_BASE_SHA...HEAD" -- backend/; then echo "backend unchanged, skipping"; exit 0; fi
+      git ls-files 'backend/*.cpp' 'backend/*.cc' 'backend/*.h' 'backend/*.hpp' | xargs -r clang-format --dry-run --Werror
+  - name: backend-build
+    run: |
+      if git diff --quiet "$AGENT_BASE_SHA...HEAD" -- backend/; then echo "backend unchanged, skipping"; exit 0; fi
+      cmake --build backend/build
+  - name: backend-tests
+    run: |
+      if git diff --quiet "$AGENT_BASE_SHA...HEAD" -- backend/; then echo "backend unchanged, skipping"; exit 0; fi
+      ctest --test-dir backend/build --output-on-failure
+  # Optional: a second build with sanitizers catches memory bugs the reviewer might miss.
+  # - name: backend-sanitizers
+  #   run: |
+  #     cmake -S backend -B backend/build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  #       -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+  #     cmake --build backend/build-asan && ctest --test-dir backend/build-asan --output-on-failure
+  - name: frontend-lint
+    run: |
+      if git diff --quiet "$AGENT_BASE_SHA...HEAD" -- frontend/; then echo "frontend unchanged, skipping"; exit 0; fi
+      npm --prefix frontend run lint
+  - name: frontend-tests
+    run: |
+      if git diff --quiet "$AGENT_BASE_SHA...HEAD" -- frontend/; then echo "frontend unchanged, skipping"; exit 0; fi
+      npm --prefix frontend test -- --run
+
+security:
+  semgrep: true             # covers both C++ and JS
+  gitleaks: true
+
+models:
+  builder: claude-opus-5-5
+  reviewer: claude-fable-5-1
+
+builder:
+  max_turns: 80             # full-stack tasks touch more files
+  allowed_commands:
+    - "cmake:*"
+    - "ctest:*"
+    - "clang-format:*"
+    - "clang-tidy:*"
+    - "npm --prefix frontend run:*"
+    - "npm --prefix frontend test:*"
+    - "npx --prefix frontend:*"
+
+review:
+  max_turns: 40
+  max_rounds: 3
+  block_on: [blocker, major]
+  auto_fix: agent_prs
+  ignore_paths: ["frontend/package-lock.json", "frontend/dist/*", "backend/build/*"]
+  focus: |
+    This repo has a C++ backend (backend/) and a JavaScript frontend (frontend/).
+    - C++: check ownership and lifetimes, bounds, use-after-free, integer overflow,
+      thread safety, and that exceptions or error codes are not silently dropped.
+    - The HTTP/API boundary: every request field the backend reads must be validated
+      (type, size, range) before use; never trust the frontend's validation.
+    - Contract drift: when an endpoint, request body or response shape changes on one
+      side, the other side must change to match. Flag mismatches as major.
+    - Frontend: no secrets in client code, no unsanitized HTML (innerHTML,
+      dangerouslySetInnerHTML), and handle loading and error states for API calls.

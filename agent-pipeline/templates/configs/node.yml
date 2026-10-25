@@ -1,0 +1,38 @@
+# .agent-pipeline.yml — settings for the builder/reviewer agent pipeline
+language: node
+version: "20"
+setup: |
+  npm ci
+
+gates:
+  - name: lint
+    run: npm run lint
+  - name: typecheck
+    run: npx tsc --noEmit
+  - name: tests
+    run: npm test -- --ci
+
+security:
+  semgrep: true
+  gitleaks: true
+
+models:
+  builder: claude-opus-5-5
+  reviewer: claude-fable-5-1
+
+builder:
+  max_turns: 60
+  allowed_commands:
+    - "npm run lint:*"
+    - "npm test:*"
+    - "npx tsc:*"
+    - "npx eslint:*"
+    - "npx prettier:*"
+
+review:
+  max_turns: 30
+  max_rounds: 3
+  block_on: [blocker, major]
+  auto_fix: agent_prs
+  ignore_paths: ["package-lock.json", "dist/*"]
+  focus: ""

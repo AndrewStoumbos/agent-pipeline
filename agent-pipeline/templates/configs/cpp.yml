@@ -1,0 +1,38 @@
+# .agent-pipeline.yml — settings for the builder/reviewer agent pipeline
+# Generic C/C++ with CMake. (Unreal Engine projects can't build on GitHub-hosted
+# runners; for those, keep only the format gate here or use a self-hosted runner.)
+language: none
+setup: |
+  sudo apt-get update -qq && sudo apt-get install -y -qq clang-format cmake ninja-build
+
+gates:
+  - name: format
+    run: git ls-files '*.cpp' '*.h' '*.hpp' | xargs -r clang-format --dry-run --Werror
+  - name: build
+    run: cmake -S . -B build -G Ninja && cmake --build build
+  - name: tests
+    run: ctest --test-dir build --output-on-failure
+
+security:
+  semgrep: true
+  gitleaks: true
+
+models:
+  builder: claude-opus-5-5
+  reviewer: claude-fable-5-1
+
+builder:
+  max_turns: 60
+  allowed_commands:
+    - "cmake:*"
+    - "ctest:*"
+    - "clang-format:*"
+
+review:
+  max_turns: 30
+  max_rounds: 3
+  block_on: [blocker, major]
+  auto_fix: agent_prs
+  ignore_paths: []
+  focus: |
+    Pay particular attention to memory safety: ownership, lifetimes, bounds, and use-after-free.
