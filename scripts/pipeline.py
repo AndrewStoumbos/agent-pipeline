@@ -328,8 +328,11 @@ def cmd_gates(a):
     if sec.get("semgrep"):
         gates.append({
             "name": "semgrep (changed code only)",
-            "run": "python3 -m pip install -q semgrep >/dev/null 2>&1 && "
-                   f"semgrep scan --config p/default --error --metrics off --quiet "
+            # The venv lives in a cached folder (see agent-review.yml), so this installs once.
+            "run": "export SEMGREP_ENABLE_VERSION_CHECK=0; V=\"$HOME/.cache/agent-semgrep\"; "
+                   "\"$V/bin/semgrep\" --version >/dev/null 2>&1 || "
+                   "{ rm -rf \"$V\"; python3 -m venv \"$V\" && \"$V/bin/pip\" install -q semgrep >/dev/null; } && "
+                   f"\"$V/bin/semgrep\" scan --config p/default --error --metrics off --quiet "
                    f"--baseline-commit {base} --exclude .agent-work --exclude .agent-pipeline-src",
         })
     if sec.get("gitleaks"):

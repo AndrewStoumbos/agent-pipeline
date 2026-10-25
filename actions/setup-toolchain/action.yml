@@ -12,6 +12,10 @@ inputs:
     description: Shell command that installs project dependencies
     required: false
     default: ""
+  cache:
+    description: Cache dependencies and build output between runs ("true" / "false")
+    required: false
+    default: "true"
 runs:
   using: composite
   steps:
@@ -19,22 +23,26 @@ runs:
       uses: actions/setup-python@v5
       with:
         python-version: ${{ inputs.version || '3.12' }}
+        cache: ${{ inputs.cache == 'true' && hashFiles('**/requirements*.txt') != '' && 'pip' || '' }}
 
     - if: inputs.language == 'node'
       uses: actions/setup-node@v4
       with:
         node-version: ${{ inputs.version || '20' }}
+        cache: ${{ inputs.cache == 'true' && hashFiles('**/package-lock.json') != '' && 'npm' || '' }}
 
     - if: inputs.language == 'go'
       uses: actions/setup-go@v5
       with:
         go-version: ${{ inputs.version || 'stable' }}
+        cache: ${{ inputs.cache == 'true' && hashFiles('**/go.sum') != '' }}
 
     - if: inputs.language == 'java'
       uses: actions/setup-java@v4
       with:
         distribution: temurin
         java-version: ${{ inputs.version || '21' }}
+        cache: ${{ inputs.cache == 'true' && (hashFiles('**/*.gradle*') != '' && 'gradle' || hashFiles('**/pom.xml') != '' && 'maven') || '' }}
 
     - if: inputs.language == 'rust'
       shell: bash
@@ -43,6 +51,12 @@ runs:
       run: |
         rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
         rustup default "$RUST_VERSION"
+
+    - if: inputs.language == 'rust' && inputs.cache == 'true'
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: agent-pipeline     # same cache for builder, fixer and gates
+        cache-on-failure: true         # a failing round still warms the cache
 
     - if: inputs.language == 'dotnet'
       uses: actions/setup-dotnet@v4

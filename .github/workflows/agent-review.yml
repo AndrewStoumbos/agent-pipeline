@@ -116,6 +116,12 @@ jobs:
           version: ${{ steps.cfg.outputs.version }}
           setup: ${{ steps.cfg.outputs.setup }}
 
+      - name: Cache security tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/agent-semgrep
+          key: agent-semgrep-${{ runner.os }}-v1
+
       - id: gates
         name: Run gates (lint, tests, security)
         run: python3 "$PIPE" gates --base-sha "${{ needs.prepare.outputs.base_sha }}"
