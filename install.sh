@@ -3,16 +3,17 @@
 #
 #   ./install.sh <project-dir> <language> [--ref v1] [--repo owner/agent-pipeline] [--github]
 #
-#   language   python | node | go | rust | java | dotnet | cpp
+#   language   python | node | go | rust | java | dotnet | cpp | cpp-node
 #   --ref      tag/branch of agent-pipeline to pin (default: v1)
 #   --repo     owner/name of this pipeline repo (default: read from this checkout's origin)
-#   --github   also configure the GitHub side with `gh`: labels, the ANTHROPIC_API_KEY
-#              secret (from $ANTHROPIC_API_KEY), and "Allow GitHub Actions to create PRs"
+#   --github   also configure the GitHub side with `gh`: labels, the Claude credential
+#              secret (from $CLAUDE_CODE_OAUTH_TOKEN or $ANTHROPIC_API_KEY), and
+#              "Allow GitHub Actions to create PRs"
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 project="${1:-}"; lang="${2:-}"
-[[ -n "$project" && -n "$lang" ]] || { sed -n '2,12p' "$0"; exit 1; }
+[[ -n "$project" && -n "$lang" ]] || { sed -n '2,11p' "$0"; exit 1; }
 shift 2
 
 ref="v1"; pipeline_repo=""; configure_github=false
@@ -58,11 +59,16 @@ if $configure_github; then
   gh api -X PUT "repos/$repo/actions/permissions/workflow" \
     -f default_workflow_permissions=read -F can_approve_pull_request_reviews=true >/dev/null
   echo "✓ labels created; Actions may now open PRs (workflow token stays read-only by default)"
-  if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+  if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+    gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo "$repo" --body "$CLAUDE_CODE_OAUTH_TOKEN"
+    echo "✓ CLAUDE_CODE_OAUTH_TOKEN secret set (runs use your Claude subscription)"
+  elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
     gh secret set ANTHROPIC_API_KEY --repo "$repo" --body "$ANTHROPIC_API_KEY"
-    echo "✓ ANTHROPIC_API_KEY secret set"
+    echo "✓ ANTHROPIC_API_KEY secret set (runs are billed per token)"
   else
-    echo "• ANTHROPIC_API_KEY not in env; set it with: gh secret set ANTHROPIC_API_KEY --repo $repo"
+    echo "• No Claude credential in env. Set ONE of:"
+    echo "    gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo $repo   # from 'claude setup-token' (subscription)"
+    echo "    gh secret set ANTHROPIC_API_KEY --repo $repo         # API key (pay per token)"
   fi
 fi
 

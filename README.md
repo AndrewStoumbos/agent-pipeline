@@ -66,18 +66,38 @@ and prices at https://platform.claude.com/docs/en/models/overview.
    Settings → Actions → General → Access → "Accessible from repositories owned by the user",
    **and** create a fine-grained PAT with read access to this repo, saved in each project as the
    secret `PIPELINE_REPO_TOKEN` (the workflows need it to check out the scripts).
-4. **Get an Anthropic API key** from https://platform.claude.com and keep it handy.
+4. **Pick a Claude credential** (see "Paying for it" below): a subscription token from
+   `claude setup-token`, or an API key from https://platform.claude.com.
+
+## Paying for it: subscription or API key
+
+Each project needs ONE of these repository secrets. If both are set, the subscription token wins.
+
+| Secret | What it is | Billing |
+|---|---|---|
+| `CLAUDE_CODE_OAUTH_TOKEN` | Long-lived token for your Claude subscription (Pro, Max, Team, Enterprise). Run `claude setup-token` on your own machine and paste the result. | Counts against your plan's usage limits, shared with your normal Claude and Claude Code use. |
+| `ANTHROPIC_API_KEY` | Claude API key from the Claude Console. | Pay per token. Best for shared/org repos. |
+
+With a subscription token:
+- **Check your plan's model access.** On Pro (and standard Team/Enterprise seats), Fable models
+  are not part of the plan's limits and run on pay-as-you-go usage credits. If that's you, set
+  `models.reviewer: claude-opus-5-5` (builder and reviewer can still be different settings and
+  run in separate, independent sessions).
+- **Limits can stall a run.** If you hit your usage limit mid-run, that job fails; re-run it
+  later. Keep `max_turns` and `max_rounds` modest.
+- **It's tied to you.** The token acts as your subscription, so only put it in repos you
+  control, and revoke/regenerate it if it leaks. For repos other people push to, use an API key.
 
 ## Adding a project
 
 ```bash
 cd agent-pipeline
-export ANTHROPIC_API_KEY=sk-ant-...        # only needed with --github
+export CLAUDE_CODE_OAUTH_TOKEN=...         # from `claude setup-token`; or ANTHROPIC_API_KEY=sk-ant-...
 ./install.sh ../my-project python --github
 ```
 
 This writes `.github/workflows/agent.yml` and `.agent-pipeline.yml` into the project and, with
-`--github`, creates the labels, sets the secret, and allows Actions to open PRs. Then:
+`--github`, creates the labels, sets the Claude credential secret, and allows Actions to open PRs. Then:
 
 1. Edit `.agent-pipeline.yml` so `setup` and `gates` match how the project really builds.
    Tip: every gate should pass on `main` before you turn the pipeline on.
@@ -85,7 +105,7 @@ This writes `.github/workflows/agent.yml` and `.agent-pipeline.yml` into the pro
 3. Commit and push to the default branch.
 4. Turn on branch protection (below).
 
-Templates exist for `python`, `node`, `go`, `rust`, `java`, `dotnet` and `cpp`. For anything
+Templates exist for `python`, `node`, `go`, `rust`, `java`, `dotnet`, `cpp`, and `cpp-node` (C++ backend + JS frontend in one repo; gates skip whichever half a PR didn't touch using `$AGENT_BASE_SHA`). For anything
 else, start from any template, set `language: none`, and install tools in `setup`.
 
 ### Branch protection

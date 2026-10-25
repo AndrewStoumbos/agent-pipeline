@@ -25,7 +25,11 @@ on:
         default: agent.yml
     secrets:
       ANTHROPIC_API_KEY:
-        required: true
+        description: Claude API key (pay per token). Set this OR CLAUDE_CODE_OAUTH_TOKEN.
+        required: false
+      CLAUDE_CODE_OAUTH_TOKEN:
+        description: Claude subscription token from `claude setup-token`. Used instead of the API key when set.
+        required: false
       PIPELINE_REPO_TOKEN:
         description: Only needed if the agent-pipeline repo is private
         required: false
@@ -48,6 +52,15 @@ jobs:
       round: ${{ steps.pr.outputs.round }}
       is_agent_pr: ${{ steps.pr.outputs.is_agent_pr }}
     steps:
+      - name: Check Claude credentials
+        env:
+          HAS_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+          HAS_OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: |
+          if [[ "$HAS_OAUTH" == "true" ]]; then echo "Using Claude subscription token (CLAUDE_CODE_OAUTH_TOKEN)"
+          elif [[ "$HAS_KEY" == "true" ]]; then echo "Using Claude API key (ANTHROPIC_API_KEY)"
+          else echo "::error::Set the ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN secret in this repository"; exit 1; fi
+
       - uses: actions/checkout@v4
         with:
           repository: ${{ inputs.pipeline_repo }}
@@ -186,7 +199,9 @@ jobs:
         name: Reviewer agent
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Exactly one credential is passed; a subscription token wins if both are set.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN == '' && secrets.ANTHROPIC_API_KEY || '' }}
           github_token: ${{ github.token }}
           allowed_bots: github-actions[bot]
           prompt: ${{ steps.render.outputs.prompt }}

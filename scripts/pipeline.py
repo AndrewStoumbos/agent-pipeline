@@ -322,6 +322,9 @@ def cmd_gates(a):
     gates = list(cfg["gates"])
     sec = cfg.get("security") or {}
     base = a.base_sha
+    # Exposed to every gate so monorepo gates can skip parts of the tree the PR didn't touch:
+    #   git diff --quiet "$AGENT_BASE_SHA...HEAD" -- backend/ || <run backend checks>
+    os.environ["AGENT_BASE_SHA"] = base
     if sec.get("semgrep"):
         gates.append({
             "name": "semgrep (changed code only)",
