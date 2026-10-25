@@ -184,7 +184,7 @@ def builder_tools(cfg: dict) -> str:
     return ",".join(dict.fromkeys(tools))
 
 
-REVIEWER_TOOLS = "Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
+REVIEWER_TOOLS = "Read,Glob,Grep,StructuredOutput,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
 
 
 def cmd_config(a):
@@ -399,11 +399,92 @@ def fmt_comment(c: dict) -> str:
             f"**Suggestion:** {c['suggestion'].strip()}")
 
 
-def cmd_post_review(a):
+def _execution_texts(path: str) -> list[str]:
+    """Final result text first, then assistant text blocks (newest first) from the
+    claude-code-action execution file (a JSON array or newline-delimited JSON)."""
+    p = Path(path) if path else None
+    if not p or not p.is_file():
+        candidates = sorted(Path(os.environ.get("RUNNER_TEMP", ".")).glob("**/*execution*.json"))
+        if not candidates:
+            return []
+        p = candidates[-1]
+    text = p.read_text(encoding="utf-8", errors="replace")
+    try:
+        msgs = json.loads(text)
+        msgs = msgs if isinstance(msgs, list) else [msgs]
+    except json.JSONDecodeError:
+        msgs = [json.loads(line) for line in text.splitlines() if line.strip().startswith("{")]
+    results, assistant = [], []
+    for m in msgs:
+        if m.get("type") == "result" and isinstance(m.get("result"), str):
+            results.append(m["result"])
+        elif m.get("type") == "assistant":
+            for block in (m.get("message") or {}).get("content") or []:
+                if block.get("type") == "text":
+                    assistant.append(block.get("text", ""))
+                elif block.get("type") == "tool_use" and block.get("name") == "StructuredOutput":
+                    assistant.append(json.dumps(block.get("input")))
+    return results[::-1] + assistant[::-1]
+
+
+def _extract_review(text: str):
+    """Pull a review object out of free text: ```json fenced blocks first, then the
+    outermost {...}. Unwraps {"output": {...}}-style nesting."""
+    candidates = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
+    if "{" in text:
+        candidates.append(text[text.find("{"): text.rfind("}") + 1])
+    for cand in candidates:
+        try:
+            obj = json.loads(cand)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and len(obj) == 1 and isinstance(next(iter(obj.values())), dict):
+            obj = next(iter(obj.values()))
+        if isinstance(obj, dict) and "comments" in obj and isinstance(obj["comments"], list):
+            return obj
+    return None
+
+
+def _normalize_review(review: dict) -> dict:
+    """Coerce a recovered review into the schema's shape so posting never crashes."""
+    out = {"verdict": review.get("verdict", "approve"),
+           "summary": str(review.get("summary", "")),
+           "comments": []}
+    for c in review.get("comments", []):
+        if not isinstance(c, dict):
+            continue
+        try:
+            line = max(0, int(c.get("line", 0) or 0))
+        except (TypeError, ValueError):
+            line = 0
+        sev = c.get("severity") if c.get("severity") in SEVERITIES else "minor"
+        out["comments"].append({
+            "file": str(c.get("file") or "(general)"), "line": line, "severity": sev,
+            "category": str(c.get("category") or "maintainability"),
+            "issue": str(c.get("issue") or c.get("comment") or ""),
+            "suggestion": str(c.get("suggestion") or ""),
+        })
+    return out
+
+
+def load_review() -> dict:
     raw = os.environ.get("REVIEW_JSON", "").strip()
-    if not raw:
-        fail("Reviewer returned no structured output")
-    review = json.loads(raw)
+    if raw:
+        return _normalize_review(json.loads(raw))
+    print("::warning::Reviewer returned no structured output; recovering the review from its final message")
+    texts = _execution_texts(os.environ.get("EXECUTION_FILE", ""))
+    for t in texts:
+        review = _extract_review(t)
+        if review is not None:
+            return _normalize_review(review)
+    last = texts[0][-3000:] if texts else "(no execution output found)"
+    print(f"Reviewer's final message:\n{last}")
+    fail("Reviewer produced no review (no structured output and no JSON in its final message). "
+         "Its final message is printed above.")
+
+
+def cmd_post_review(a):
+    review = load_review()
     cfg = json.loads((WORK / "config.json").read_text())
     block_on = set(cfg["review"]["block_on"])
     ignore = cfg["review"].get("ignore_paths") or []
@@ -437,7 +518,8 @@ def cmd_post_review(a):
     ]
     if outside:
         body += ["", "#### Comments outside the diff"]
-        body += [f"- `{c['file']}:{c['line']}` — {fmt_comment(c)}" for c in outside]
+        body += [f"- `{c['file'] + (':' + str(c['line']) if c['line'] else '')}` — {fmt_comment(c)}"
+                 for c in outside]
     body_text = "\n".join(body)[:65000]
 
     payload = {"commit_id": a.head_sha, "event": "COMMENT", "body": body_text, "comments": inline}

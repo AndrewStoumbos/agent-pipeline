@@ -197,6 +197,9 @@ jobs:
 
       - id: reviewer
         name: Reviewer agent
+        # If structured output goes missing, the next step recovers the review from the
+        # agent's final message instead of failing the whole round.
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           # Exactly one credential is passed; a subscription token wins if both are set.
@@ -216,6 +219,7 @@ jobs:
         name: Post review on the PR
         env:
           REVIEW_JSON: ${{ steps.reviewer.outputs.structured_output }}
+          EXECUTION_FILE: ${{ steps.reviewer.outputs.execution_file }}
         run: >
           python3 "$PIPE" post-review --pr "${{ inputs.pr_number }}"
           --head-sha "${{ needs.prepare.outputs.head_sha }}"

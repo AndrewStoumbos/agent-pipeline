@@ -1,11 +1,18 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "summary", "comments"],
+  "required": [
+    "verdict",
+    "summary",
+    "comments"
+  ],
   "properties": {
     "verdict": {
       "type": "string",
-      "enum": ["approve", "request_changes"]
+      "enum": [
+        "approve",
+        "request_changes"
+      ]
     },
     "summary": {
       "type": "string",
@@ -16,17 +23,51 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["file", "line", "severity", "category", "issue", "suggestion"],
+        "required": [
+          "file",
+          "line",
+          "severity",
+          "category",
+          "issue",
+          "suggestion"
+        ],
         "properties": {
-          "file": { "type": "string", "description": "Path relative to repo root." },
-          "line": { "type": "integer", "minimum": 1, "description": "Line number in the NEW version of the file." },
-          "severity": { "type": "string", "enum": ["blocker", "major", "minor", "nit"] },
+          "file": {
+            "type": "string",
+            "description": "Path relative to repo root. Use (general) for comments about the PR as a whole."
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Line number in the NEW version of the file. Use 0 when the comment is about the file or PR as a whole."
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "blocker",
+              "major",
+              "minor",
+              "nit"
+            ]
+          },
           "category": {
             "type": "string",
-            "enum": ["bug", "security", "performance", "requirements", "test-gap", "maintainability", "style"]
+            "enum": [
+              "bug",
+              "security",
+              "performance",
+              "requirements",
+              "test-gap",
+              "maintainability",
+              "style"
+            ]
           },
-          "issue": { "type": "string" },
-          "suggestion": { "type": "string" }
+          "issue": {
+            "type": "string"
+          },
+          "suggestion": {
+            "type": "string"
+          }
         }
       }
     }
