@@ -1,0 +1,305 @@
+name: agent-review
+
+# Reusable workflow: deterministic gates -> reviewer agent -> verdict (+ hand-off to the fixer).
+# Called from each project's .github/workflows/agent.yml.
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        type: number
+        required: true
+      pipeline_repo:
+        description: owner/name of this agent-pipeline repo
+        type: string
+        required: true
+      pipeline_ref:
+        type: string
+        default: v1
+      config_path:
+        type: string
+        default: .agent-pipeline.yml
+      caller_workflow:
+        description: File name of the project's caller workflow (used to dispatch the fixer)
+        type: string
+        default: agent.yml
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      PIPELINE_REPO_TOKEN:
+        description: Only needed if the agent-pipeline repo is private
+        required: false
+
+env:
+  PIPE: .agent-pipeline-src/scripts/pipeline.py
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    outputs:
+      skip: ${{ steps.pr.outputs.skip }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      head_ref: ${{ steps.pr.outputs.head_ref }}
+      base_sha: ${{ steps.pr.outputs.base_sha }}
+      round: ${{ steps.pr.outputs.round }}
+      is_agent_pr: ${{ steps.pr.outputs.is_agent_pr }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.pipeline_repo }}
+          ref: ${{ inputs.pipeline_ref }}
+          path: .agent-pipeline-src
+          token: ${{ secrets.PIPELINE_REPO_TOKEN || github.token }}
+      - id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$PIPE" pr-state --pr "${{ inputs.pr_number }}"
+
+  gates:
+    needs: prepare
+    if: needs.prepare.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+    outputs:
+      passed: ${{ steps.gates.outputs.passed }}
+      max_rounds: ${{ steps.cfg.outputs.max_rounds }}
+      auto_fix: ${{ steps.cfg.outputs.auto_fix }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.head_sha }}
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.pipeline_repo }}
+          ref: ${{ inputs.pipeline_ref }}
+          path: .agent-pipeline-src
+          token: ${{ secrets.PIPELINE_REPO_TOKEN || github.token }}
+      - run: printf '.agent-work/\n.agent-pipeline-src/\n' >> .git/info/exclude
+
+      - id: cfg
+        run: python3 "$PIPE" config --path "${{ inputs.config_path }}"
+
+      - name: Mark review as pending
+        run: >
+          python3 "$PIPE" status --sha "$HEAD_SHA" --state pending
+          --description "Agent pipeline running (round ${{ needs.prepare.outputs.round }})"
+          --url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - uses: ./.agent-pipeline-src/actions/setup-toolchain
+        with:
+          language: ${{ steps.cfg.outputs.language }}
+          version: ${{ steps.cfg.outputs.version }}
+          setup: ${{ steps.cfg.outputs.setup }}
+
+      - id: gates
+        name: Run gates (lint, tests, security)
+        run: python3 "$PIPE" gates --base-sha "${{ needs.prepare.outputs.base_sha }}"
+
+      - name: Report gate failures on the PR
+        if: steps.gates.outputs.passed != 'true'
+        run: >
+          python3 "$PIPE" post-gates --pr "${{ inputs.pr_number }}"
+          --round "${{ needs.prepare.outputs.round }}" --max-rounds "${{ steps.cfg.outputs.max_rounds }}"
+
+      - if: steps.gates.outputs.passed != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-feedback-gates
+          path: .agent-work/feedback/
+          include-hidden-files: true
+          retention-days: 7
+
+  review:
+    needs: [prepare, gates]
+    if: needs.gates.outputs.passed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    outputs:
+      verdict: ${{ steps.post.outputs.verdict }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.head_sha }}
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.pipeline_repo }}
+          ref: ${{ inputs.pipeline_ref }}
+          path: .agent-pipeline-src
+          token: ${{ secrets.PIPELINE_REPO_TOKEN || github.token }}
+      - run: printf '.agent-work/\n.agent-pipeline-src/\n' >> .git/info/exclude
+
+      - id: cfg
+        run: python3 "$PIPE" config --path "${{ inputs.config_path }}"
+
+      - name: Collect PR context
+        env:
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+        run: |
+          mkdir -p .agent-work
+          gh pr view "${{ inputs.pr_number }}" --repo "$GITHUB_REPOSITORY" \
+            --json title,body,closingIssuesReferences \
+            --template '# {{.title}}{{"\n\n"}}{{.body}}{{"\n\n"}}Linked issues: {{range .closingIssuesReferences}}#{{.number}} {{end}}' \
+            > .agent-work/pr.md
+          git diff "$BASE_SHA...$HEAD_SHA" > .agent-work/pr.diff
+          echo "Diff: $(wc -l < .agent-work/pr.diff) lines"
+
+      - id: schema
+        run: echo "json=$(jq -c . .agent-pipeline-src/schemas/review.json)" >> "$GITHUB_OUTPUT"
+
+      - id: render
+        env:
+          TPL_REPO: ${{ github.repository }}
+          TPL_PR_NUMBER: ${{ inputs.pr_number }}
+          TPL_BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          TPL_HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+          TPL_ROUND: ${{ needs.prepare.outputs.round }}
+          FOCUS: ${{ steps.cfg.outputs.focus }}
+        run: |
+          if [ -n "$FOCUS" ]; then
+            export TPL_FOCUS=$'7. Project-specific focus:\n'"$FOCUS"
+          else
+            export TPL_FOCUS=""
+          fi
+          python3 "$PIPE" render --template .agent-pipeline-src/prompts/reviewer.md --out .agent-work/reviewer-prompt.md
+
+      - id: reviewer
+        name: Reviewer agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          allowed_bots: github-actions[bot]
+          prompt: ${{ steps.render.outputs.prompt }}
+          claude_args: |
+            --model ${{ steps.cfg.outputs.reviewer_model }}
+            --max-turns ${{ steps.cfg.outputs.reviewer_max_turns }}
+            --allowedTools "${{ steps.cfg.outputs.reviewer_tools }}"
+            --disallowedTools "Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch"
+            --json-schema '${{ steps.schema.outputs.json }}'
+
+      - id: post
+        name: Post review on the PR
+        env:
+          REVIEW_JSON: ${{ steps.reviewer.outputs.structured_output }}
+        run: >
+          python3 "$PIPE" post-review --pr "${{ inputs.pr_number }}"
+          --head-sha "${{ needs.prepare.outputs.head_sha }}"
+          --round "${{ needs.prepare.outputs.round }}"
+          --max-rounds "${{ steps.cfg.outputs.max_rounds }}"
+          --model "${{ steps.cfg.outputs.reviewer_model }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-feedback-review
+          path: .agent-work/feedback/
+          include-hidden-files: true
+          retention-days: 7
+
+  finalize:
+    needs: [prepare, gates, review]
+    if: always() && needs.prepare.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+      statuses: write
+      pull-requests: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ inputs.pr_number }}
+      HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+      HEAD_REF: ${{ needs.prepare.outputs.head_ref }}
+      ROUND: ${{ needs.prepare.outputs.round }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.pipeline_repo }}
+          ref: ${{ inputs.pipeline_ref }}
+          path: .agent-pipeline-src
+          token: ${{ secrets.PIPELINE_REPO_TOKEN || github.token }}
+
+      - id: decide
+        env:
+          GATES_RESULT: ${{ needs.gates.result }}
+          GATES_PASSED: ${{ needs.gates.outputs.passed }}
+          REVIEW_RESULT: ${{ needs.review.result }}
+          VERDICT: ${{ needs.review.outputs.verdict }}
+          MAX_ROUNDS: ${{ needs.gates.outputs.max_rounds || '3' }}
+          AUTO_FIX: ${{ needs.gates.outputs.auto_fix || 'never' }}
+          IS_AGENT_PR: ${{ needs.prepare.outputs.is_agent_pr }}
+        run: |
+          if [[ "$GATES_RESULT" != "success" ]]; then
+            outcome=error
+          elif [[ "$GATES_PASSED" != "true" ]]; then
+            outcome=changes
+          elif [[ "$REVIEW_RESULT" != "success" ]]; then
+            outcome=error
+          elif [[ "$VERDICT" == "request_changes" ]]; then
+            outcome=changes
+          else
+            outcome=approved
+          fi
+
+          fix=false
+          if [[ "$outcome" == "changes" ]] && (( ROUND < MAX_ROUNDS )); then
+            if [[ "$AUTO_FIX" == "all" ]] || [[ "$AUTO_FIX" == "agent_prs" && "$IS_AGENT_PR" == "true" ]]; then
+              fix=true
+            fi
+          fi
+          exhausted=false
+          if [[ "$outcome" == "changes" ]] && (( ROUND >= MAX_ROUNDS )); then exhausted=true; fi
+
+          echo "outcome=$outcome fix=$fix exhausted=$exhausted (round $ROUND/$MAX_ROUNDS)"
+          { echo "outcome=$outcome"; echo "fix=$fix"; echo "exhausted=$exhausted"; } >> "$GITHUB_OUTPUT"
+
+      - name: Set agent-review commit status
+        env:
+          OUTCOME: ${{ steps.decide.outputs.outcome }}
+          FIX: ${{ steps.decide.outputs.fix }}
+        run: |
+          case "$OUTCOME" in
+            approved) state=success; desc="Reviewer agent approved (round $ROUND). Human approval still required." ;;
+            changes)  state=failure
+                      if [[ "$FIX" == "true" ]]; then desc="Changes requested (round $ROUND); builder agent is fixing."
+                      else desc="Changes requested (round $ROUND); needs a human."; fi ;;
+            *)        state=error; desc="Agent pipeline errored; see the workflow run." ;;
+          esac
+          python3 .agent-pipeline-src/scripts/pipeline.py status --sha "$HEAD_SHA" --state "$state" --description "$desc" --url "$RUN_URL"
+
+      - name: Hand off to the builder agent for fixes
+        if: steps.decide.outputs.fix == 'true'
+        run: |
+          gh workflow run "${{ inputs.caller_workflow }}" --repo "$GITHUB_REPOSITORY" --ref "$HEAD_REF" \
+            -f mode=fix -f pr_number="$PR" -f feedback_run_id="$GITHUB_RUN_ID"
+
+      - name: Escalate to a human
+        # Human-authored PRs just get the review comments; agent PRs that can't continue get flagged.
+        if: steps.decide.outputs.outcome == 'changes' && steps.decide.outputs.fix != 'true' && needs.prepare.outputs.is_agent_pr == 'true'
+        run: |
+          gh label create "agent:needs-human" --repo "$GITHUB_REPOSITORY" --color B60205 \
+            --description "Agent pipeline stopped; a human needs to take over" 2>/dev/null || true
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label "agent:needs-human"
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body \
+            "🤖 The agent pipeline stopped at round $ROUND with unresolved problems, so a human needs to take over. Details: $RUN_URL"

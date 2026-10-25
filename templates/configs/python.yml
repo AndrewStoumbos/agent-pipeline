@@ -1,0 +1,45 @@
+# .agent-pipeline.yml — settings for the builder/reviewer agent pipeline
+language: python            # python | node | go | rust | java | dotnet | none
+version: "3.12"             # toolchain version (optional)
+setup: |                    # install dependencies before gates / agents run
+  pip install -r requirements.txt
+  pip install ruff mypy pytest
+
+# Deterministic gates run BEFORE the reviewer agent. Any non-zero exit fails the round.
+gates:
+  - name: lint
+    run: ruff check .
+  - name: format
+    run: ruff format --check .
+  - name: typecheck
+    run: mypy .
+  - name: tests
+    run: pytest -q
+
+security:
+  semgrep: true             # static analysis on changed code only
+  gitleaks: true            # secret scanning on new commits only
+
+models:
+  builder: claude-opus-5-5  # long-running agentic coding
+  reviewer: claude-fable-5-1  # strongest reasoning, used for the independent check
+
+builder:
+  max_turns: 60
+  # Shell commands the builder may run (Claude Code permission syntax; ":*" = any args)
+  allowed_commands:
+    - "ruff:*"
+    - "mypy:*"
+    - "pytest:*"
+    - "python -m pytest:*"
+
+review:
+  max_turns: 30
+  max_rounds: 3             # total review rounds before handing to a human
+  block_on: [blocker, major]
+  auto_fix: agent_prs       # agent_prs | all | never  (who gets automatic fix rounds)
+  ignore_paths: []          # e.g. ["migrations/*", "*.lock"]
+  # Optional project-specific review instructions, for example:
+  # focus: |
+  #   All SQL must use parameterized queries via the db.query() helper.
+  focus: ""
